@@ -19,7 +19,7 @@ const HTML_STORAGE_NAME = "html-storage";
 const MARKDOWN_PAGE_SCRIPT_PATH = "/assets/markdown-page.js";
 const MARKDOWN_PAGE_STYLE_PATH = "/assets/markdown-page.css";
 const MAX_CONTENT_BYTES = 1024 * 1024;
-const PAGE_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const PAGE_CACHE_CONTROL = "public, max-age=0, must-revalidate";
 const DEFAULT_HTML_TITLE = "Shared HTML";
 const DEFAULT_MARKDOWN_TITLE = "Shared Markdown";
 const MARKDOWN_FAVICON_DATA_URL =
@@ -38,6 +38,7 @@ type StorePageResult = {
   createdAt: number;
   format: StoredFormat;
   id: string;
+  updatedAt: number;
 };
 
 type PageRow = {
@@ -50,6 +51,7 @@ type PageMetadataRow = {
   id: string;
   label: string | null;
   title: string | null;
+  updated_at: number;
 };
 
 type PageRecord = PageMetadataRow & {
@@ -61,12 +63,17 @@ type SearchPagesInput = {
   query?: string;
 };
 
+type UpdateContentInput = ShareContentInput & {
+  id: string;
+};
+
 type SearchPageRow = {
   created_at: number;
   format: StoredFormat;
   id: string;
   label: string | null;
   title: string | null;
+  updated_at: number;
 };
 
 type TableInfoRow = {
@@ -78,6 +85,14 @@ type HtmlStorageStub = ReturnType<Env["HTML_STORAGE"]["getByName"]> & {
   getPageMetadata(id: string): Promise<PageMetadataRow | null>;
   searchPages(query?: string, limit?: number): Promise<SearchPageRow[]>;
   storePage(
+    format: StoredFormat,
+    html: string,
+    source: string | null,
+    title: string | null,
+    label: string | null
+  ): Promise<StorePageResult>;
+  updatePage(
+    id: string,
     format: StoredFormat,
     html: string,
     source: string | null,
@@ -152,6 +167,46 @@ function isUniqueConstraintError(error: unknown): boolean {
 
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
   return Response.json(body, init);
+}
+
+function formatHttpDate(timestamp: number): string {
+  return new Date(timestamp).toUTCString();
+}
+
+function buildPageEtag(pageId: string, updatedAt: number): string {
+  return `"${pageId}:${updatedAt}"`;
+}
+
+function buildMutablePageHeaders(
+  pageId: string,
+  updatedAt: number,
+  contentType: string
+): Headers {
+  return new Headers({
+    "Cache-Control": PAGE_CACHE_CONTROL,
+    "Content-Type": contentType,
+    ETag: buildPageEtag(pageId, updatedAt),
+    "Last-Modified": formatHttpDate(updatedAt)
+  });
+}
+
+function matchesConditionalRequest(request: Request, pageId: string, updatedAt: number): boolean {
+  const ifNoneMatch = request.headers.get("if-none-match");
+  if (ifNoneMatch && ifNoneMatch === buildPageEtag(pageId, updatedAt)) {
+    return true;
+  }
+
+  const ifModifiedSince = request.headers.get("if-modified-since");
+  if (!ifModifiedSince) {
+    return false;
+  }
+
+  const since = Date.parse(ifModifiedSince);
+  if (Number.isNaN(since)) {
+    return false;
+  }
+
+  return updatedAt <= since;
 }
 
 function getPublicBaseUrl(env: Env, requestOrigin: string): string {
@@ -349,6 +404,33 @@ function normalizeShareContent(input: ShareContentInput): {
   };
 }
 
+function applyMetadataUpdate(
+  existing: PageMetadataRow,
+  next: {
+    format: StoredFormat;
+    label: string | null;
+    title: string | null;
+  },
+  input: ShareContentInput
+): {
+  label: string | null;
+  title: string | null;
+} {
+  const label = input.label === undefined ? existing.label : next.label;
+
+  if (input.title === undefined) {
+    return {
+      label,
+      title: next.format === "markdown" ? next.title : existing.title
+    };
+  }
+
+  return {
+    label,
+    title: next.title
+  };
+}
+
 function createMcpServer(env: Env, publicBaseUrl: string): McpServer {
   const server = new McpServer({
     name: "html-storage-mcp",
@@ -369,7 +451,7 @@ function createMcpServer(env: Env, publicBaseUrl: string): McpServer {
     },
     async (input: ShareContentInput) => {
       const { format, html, label, source, title } = normalizeShareContent(input);
-      const { createdAt, id } = await getStorageStub(env).storePage(
+      const { createdAt, id, updatedAt } = await getStorageStub(env).storePage(
         format,
         html,
         source,
@@ -391,6 +473,58 @@ function createMcpServer(env: Env, publicBaseUrl: string): McpServer {
           id,
           label,
           title,
+          updatedAt,
+          url
+        }
+      };
+    }
+  );
+
+  server.registerTool(
+    "update_content",
+    {
+      description: "Update an existing shared page in place and keep the same public URL.",
+      inputSchema: {
+        html: z.string().optional(),
+        id: z.string(),
+        label: z.string().optional(),
+        markdown: z.string().optional(),
+        title: z.string().optional()
+      },
+      title: "Update Content"
+    },
+    async (input: UpdateContentInput) => {
+      const existing = await getStorageStub(env).getPageMetadata(input.id);
+      if (existing === null) {
+        throw new Error(`Shared page ${input.id} was not found.`);
+      }
+
+      const normalized = normalizeShareContent(input);
+      const metadata = applyMetadataUpdate(existing, normalized, input);
+      const { createdAt, format, id, updatedAt } = await getStorageStub(env).updatePage(
+        input.id,
+        normalized.format,
+        normalized.html,
+        normalized.source,
+        metadata.title,
+        metadata.label
+      );
+      const url = buildPageUrl(publicBaseUrl, id);
+
+      return {
+        content: [
+          {
+            text: `Updated ${format} page ${id} at ${url}`,
+            type: "text"
+          }
+        ],
+        structuredContent: {
+          createdAt,
+          format,
+          id,
+          label: metadata.label,
+          title: metadata.title,
+          updatedAt,
           url
         }
       };
@@ -427,6 +561,7 @@ function createMcpServer(env: Env, publicBaseUrl: string): McpServer {
             id: page.id,
             label: page.label,
             title: page.title,
+            updatedAt: page.updated_at,
             url: `${publicBaseUrl}/p/${page.id}`
           }))
         }
@@ -448,7 +583,8 @@ export class HtmlStorageDurableObject extends DurableObject<Env> {
           format TEXT NOT NULL DEFAULT 'html',
           source TEXT,
           html TEXT NOT NULL,
-          created_at INTEGER NOT NULL
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL DEFAULT 0
         )
       `);
 
@@ -473,13 +609,23 @@ export class HtmlStorageDurableObject extends DurableObject<Env> {
       if (!columns.has("label")) {
         this.ctx.storage.sql.exec("ALTER TABLE pages ADD COLUMN label TEXT");
       }
+
+      if (!columns.has("updated_at")) {
+        this.ctx.storage.sql.exec(
+          "ALTER TABLE pages ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0"
+        );
+      }
+
+      this.ctx.storage.sql.exec(
+        "UPDATE pages SET updated_at = created_at WHERE updated_at = 0 OR updated_at IS NULL"
+      );
     });
   }
 
   async getPage(id: string): Promise<PageRecord | null> {
     const row = this.ctx.storage.sql
       .exec<PageRecord>(
-        "SELECT id, format, title, label, created_at, html FROM pages WHERE id = ? LIMIT 1",
+        "SELECT id, format, title, label, created_at, updated_at, html FROM pages WHERE id = ? LIMIT 1",
         id
       )
       .toArray()[0];
@@ -490,7 +636,7 @@ export class HtmlStorageDurableObject extends DurableObject<Env> {
   async getPageMetadata(id: string): Promise<PageMetadataRow | null> {
     const row = this.ctx.storage.sql
       .exec<PageMetadataRow>(
-        "SELECT id, format, title, label, created_at FROM pages WHERE id = ? LIMIT 1",
+        "SELECT id, format, title, label, created_at, updated_at FROM pages WHERE id = ? LIMIT 1",
         id
       )
       .toArray()[0];
@@ -506,23 +652,25 @@ export class HtmlStorageDurableObject extends DurableObject<Env> {
     label: string | null
   ): Promise<StorePageResult> {
     const createdAt = Date.now();
+    const updatedAt = createdAt;
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const id = generatePageId();
 
       try {
         this.ctx.storage.sql.exec(
-          "INSERT INTO pages (id, format, source, html, created_at, title, label) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO pages (id, format, source, html, created_at, updated_at, title, label) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
           id,
           format,
           source,
           html,
           createdAt,
+          updatedAt,
           title,
           label
         );
 
-        return { createdAt, format, id };
+        return { createdAt, format, id, updatedAt };
       } catch (error) {
         if (isUniqueConstraintError(error)) {
           continue;
@@ -535,6 +683,41 @@ export class HtmlStorageDurableObject extends DurableObject<Env> {
     throw new Error("Failed to allocate a unique page id.");
   }
 
+  async updatePage(
+    id: string,
+    format: StoredFormat,
+    html: string,
+    source: string | null,
+    title: string | null,
+    label: string | null
+  ): Promise<StorePageResult> {
+    const existing = await this.getPageMetadata(id);
+    if (existing === null) {
+      throw new Error(`Shared page ${id} was not found.`);
+    }
+
+    const updatedAt = Date.now();
+    this.ctx.storage.sql.exec(
+      `UPDATE pages
+       SET format = ?, source = ?, html = ?, updated_at = ?, title = ?, label = ?
+       WHERE id = ?`,
+      format,
+      source,
+      html,
+      updatedAt,
+      title,
+      label,
+      id
+    );
+
+    return {
+      createdAt: existing.created_at,
+      format,
+      id,
+      updatedAt
+    };
+  }
+
   async searchPages(query?: string, limit = 20): Promise<SearchPageRow[]> {
     const normalizedLimit = Math.max(1, Math.min(limit, 100));
     const normalizedQuery = query?.trim();
@@ -542,7 +725,7 @@ export class HtmlStorageDurableObject extends DurableObject<Env> {
     if (!normalizedQuery) {
       return this.ctx.storage.sql
         .exec<SearchPageRow>(
-          "SELECT id, format, title, label, created_at FROM pages ORDER BY created_at DESC LIMIT ?",
+          "SELECT id, format, title, label, created_at, updated_at FROM pages ORDER BY updated_at DESC LIMIT ?",
           normalizedLimit
         )
         .toArray();
@@ -552,12 +735,12 @@ export class HtmlStorageDurableObject extends DurableObject<Env> {
 
     return this.ctx.storage.sql
       .exec<SearchPageRow>(
-        `SELECT id, format, title, label, created_at
+        `SELECT id, format, title, label, created_at, updated_at
          FROM pages
          WHERE lower(id) LIKE ?
             OR lower(coalesce(title, '')) LIKE ?
             OR lower(coalesce(label, '')) LIKE ?
-         ORDER BY created_at DESC
+         ORDER BY updated_at DESC
          LIMIT ?`,
         likeQuery,
         likeQuery,
@@ -635,12 +818,17 @@ export default {
         pageTitle: page.title ?? getDefaultTitle(page.format),
         pageUrl: buildPageUrl(publicBaseUrl, pageId)
       });
+      const headers = buildMutablePageHeaders(pageId, page.updated_at, "text/html; charset=utf-8");
+
+      if (matchesConditionalRequest(request, pageId, page.updated_at)) {
+        return new Response(null, {
+          headers,
+          status: 304
+        });
+      }
 
       return new Response(html, {
-        headers: {
-          "Cache-Control": PAGE_CACHE_CONTROL,
-          "Content-Type": "text/html; charset=utf-8"
-        }
+        headers
       });
     }
 
@@ -653,10 +841,21 @@ export default {
         return new Response("Not Found", { status: 404 });
       }
 
-      return await createOgImageResponse({
+      if (matchesConditionalRequest(request, pageId, page.updated_at)) {
+        return new Response(null, {
+          headers: buildMutablePageHeaders(pageId, page.updated_at, "image/png"),
+          status: 304
+        });
+      }
+
+      const response = await createOgImageResponse({
         label: page.label,
         title: page.title ?? getDefaultTitle(page.format)
       });
+      response.headers.set("Cache-Control", PAGE_CACHE_CONTROL);
+      response.headers.set("ETag", buildPageEtag(pageId, page.updated_at));
+      response.headers.set("Last-Modified", formatHttpDate(page.updated_at));
+      return response;
     }
 
     return new Response("Not Found", { status: 404 });

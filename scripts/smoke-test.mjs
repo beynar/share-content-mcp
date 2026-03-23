@@ -56,6 +56,7 @@ async function assertToolCatalog(client) {
   const toolNames = toolsResult.tools.map((tool) => tool.name);
 
   assert(toolNames.includes("share_content"), "share_content should be exposed.");
+  assert(toolNames.includes("update_content"), "update_content should be exposed.");
   assert(toolNames.includes("search_pages"), "search_pages should be exposed.");
   assert(!toolNames.includes("share_html"), "share_html should not be exposed anymore.");
 }
@@ -100,6 +101,21 @@ async function runModeChecks(mode) {
     const htmlPageResponse = await fetch(htmlResult.structuredContent.url);
     assert.equal(htmlPageResponse.status, 200, "Shared HTML should be served.");
     assert.equal(
+      htmlPageResponse.headers.get("cache-control"),
+      "public, max-age=0, must-revalidate",
+      "Shared HTML should no longer be immutable."
+    );
+    assert.match(
+      htmlPageResponse.headers.get("etag") ?? "",
+      /^".+:\d+"$/u,
+      "Shared HTML should include an ETag."
+    );
+    assert.match(
+      htmlPageResponse.headers.get("last-modified") ?? "",
+      /GMT/u,
+      "Shared HTML should include Last-Modified."
+    );
+    assert.equal(
       htmlPageResponse.headers.get("content-type"),
       "text/html; charset=utf-8",
       "Shared HTML should be served as text/html."
@@ -126,6 +142,11 @@ async function runModeChecks(mode) {
     const htmlOgResponse = await fetch(htmlOgUrl);
     assert.equal(htmlOgResponse.status, 200, "HTML OG image should be served.");
     assert.equal(htmlOgResponse.headers.get("content-type"), "image/png", "OG route should serve PNG.");
+    assert.equal(
+      htmlOgResponse.headers.get("cache-control"),
+      "public, max-age=0, must-revalidate",
+      "HTML OG image should no longer be immutable."
+    );
 
     const markdownMarker = `markdown-marker-${mode}-${Date.now()}`;
     const markdownTitle = `Markdown Share ${mode} ${Date.now()}`;
@@ -173,6 +194,11 @@ async function runModeChecks(mode) {
 
     const markdownPageResponse = await fetch(markdownResult.structuredContent.url);
     assert.equal(markdownPageResponse.status, 200, "Markdown page should be served.");
+    assert.equal(
+      markdownPageResponse.headers.get("cache-control"),
+      "public, max-age=0, must-revalidate",
+      "Markdown page should no longer be immutable."
+    );
     const markdownPageHtml = await markdownPageResponse.text();
     assert.match(markdownPageHtml, new RegExp(markdownMarker, "u"), "Markdown heading should be present.");
     assert.match(
@@ -218,15 +244,108 @@ async function runModeChecks(mode) {
       "image/png",
       "Markdown OG route should serve PNG."
     );
+    assert.equal(
+      markdownOgResponse.headers.get("cache-control"),
+      "public, max-age=0, must-revalidate",
+      "Markdown OG image should no longer be immutable."
+    );
+
+    const updatedHtmlMarker = `html-updated-${mode}-${Date.now()}`;
+    const htmlUpdateResult = await client.callTool({
+      arguments: {
+        html: `<!doctype html><html><body><h1>${updatedHtmlMarker}</h1></body></html>`,
+        id: htmlResult.structuredContent.id,
+        title: `Updated HTML ${mode} ${Date.now()}`
+      },
+      name: "update_content"
+    });
+    assert.equal(htmlUpdateResult.isError, undefined, "HTML update should succeed.");
+    assert.equal(
+      htmlUpdateResult.structuredContent?.id,
+      htmlResult.structuredContent.id,
+      "HTML update should keep the same id."
+    );
+    assert.equal(
+      htmlUpdateResult.structuredContent?.url,
+      htmlResult.structuredContent.url,
+      "HTML update should keep the same URL."
+    );
+    assert.equal(
+      htmlUpdateResult.structuredContent?.label,
+      htmlLabel,
+      "HTML update should preserve label when omitted."
+    );
+    assert(
+      (htmlUpdateResult.structuredContent?.updatedAt ?? 0) >= (htmlResult.structuredContent?.updatedAt ?? 0),
+      "HTML update should advance updatedAt."
+    );
+    const updatedHtmlPageResponse = await fetch(htmlResult.structuredContent.url);
+    const updatedHtmlPageBody = await updatedHtmlPageResponse.text();
+    assert.match(updatedHtmlPageBody, new RegExp(updatedHtmlMarker, "u"), "Updated HTML body should be served.");
+    assert.doesNotMatch(updatedHtmlPageBody, new RegExp(htmlMarker, "u"), "Old HTML body should not remain.");
+    const htmlConditionalResponse = await fetch(htmlResult.structuredContent.url, {
+      headers: {
+        "If-None-Match": updatedHtmlPageResponse.headers.get("etag") ?? ""
+      }
+    });
+    assert.equal(htmlConditionalResponse.status, 304, "HTML page should honor If-None-Match.");
+
+    const updatedMarkdownMarker = `markdown-updated-${mode}-${Date.now()}`;
+    const updatedMarkdownLabel = `updated-${mode}`;
+    const markdownUpdateResult = await client.callTool({
+      arguments: {
+        id: markdownResult.structuredContent.id,
+        label: updatedMarkdownLabel,
+        markdown: `# ${updatedMarkdownMarker}\n\nUpdated markdown body.`,
+        title: `Updated Markdown ${mode} ${Date.now()}`
+      },
+      name: "update_content"
+    });
+    assert.equal(markdownUpdateResult.isError, undefined, "Markdown update should succeed.");
+    assert.equal(
+      markdownUpdateResult.structuredContent?.id,
+      markdownResult.structuredContent.id,
+      "Markdown update should keep the same id."
+    );
+    assert.equal(
+      markdownUpdateResult.structuredContent?.url,
+      markdownResult.structuredContent.url,
+      "Markdown update should keep the same URL."
+    );
+    assert.equal(
+      markdownUpdateResult.structuredContent?.label,
+      updatedMarkdownLabel,
+      "Markdown update should replace the label when provided."
+    );
+    const updatedMarkdownResponse = await fetch(markdownResult.structuredContent.url);
+    const updatedMarkdownPageHtml = await updatedMarkdownResponse.text();
+    assert.match(
+      updatedMarkdownPageHtml,
+      new RegExp(updatedMarkdownMarker, "u"),
+      "Updated markdown should be rendered."
+    );
+    assert.doesNotMatch(
+      updatedMarkdownPageHtml,
+      new RegExp(markdownMarker, "u"),
+      "Old markdown content should not remain."
+    );
+    const updatedMarkdownOgResponse = await fetch(markdownOgUrl);
+    assert.equal(updatedMarkdownOgResponse.status, 200, "Updated markdown OG image should still be served.");
+    const markdownConditionalResponse = await fetch(markdownOgUrl, {
+      headers: {
+        "If-None-Match": updatedMarkdownOgResponse.headers.get("etag") ?? ""
+      }
+    });
+    assert.equal(markdownConditionalResponse.status, 304, "OG image should honor If-None-Match.");
 
     const searchByLabelResult = await client.callTool({
-      arguments: { query: markdownLabel },
+      arguments: { query: updatedMarkdownLabel },
       name: "search_pages"
     });
     assert.equal(searchByLabelResult.isError, undefined, "Searching by label should succeed.");
     assert(
       searchByLabelResult.structuredContent?.pages?.some(
-        (page) => page.id === markdownResult.structuredContent.id && page.label === markdownLabel
+        (page) => page.id === markdownResult.structuredContent.id && page.label === updatedMarkdownLabel
       ),
       "Search should find the markdown page by label."
     );
@@ -238,7 +357,9 @@ async function runModeChecks(mode) {
     assert.equal(searchByIdResult.isError, undefined, "Searching by id should succeed.");
     assert(
       searchByIdResult.structuredContent?.pages?.some(
-        (page) => page.id === htmlResult.structuredContent.id && page.title === htmlTitle
+        (page) =>
+          page.id === htmlResult.structuredContent.id &&
+          page.title === htmlUpdateResult.structuredContent?.title
       ),
       "Search should find the HTML page by id."
     );
@@ -257,6 +378,31 @@ async function runModeChecks(mode) {
       name: "share_content"
     });
     assert.equal(emptyResult.isError, true, "Providing neither html nor markdown should fail.");
+
+    const updateBothResult = await client.callTool({
+      arguments: {
+        html: "<p>html</p>",
+        id: htmlResult.structuredContent.id,
+        markdown: "# markdown"
+      },
+      name: "update_content"
+    });
+    assert.equal(updateBothResult.isError, true, "update_content should reject html and markdown together.");
+
+    const updateEmptyResult = await client.callTool({
+      arguments: { id: htmlResult.structuredContent.id },
+      name: "update_content"
+    });
+    assert.equal(updateEmptyResult.isError, true, "update_content should reject missing content.");
+
+    const updateMissingResult = await client.callTool({
+      arguments: {
+        html: "<p>missing</p>",
+        id: "does-not-exist"
+      },
+      name: "update_content"
+    });
+    assert.equal(updateMissingResult.isError, true, "update_content should reject unknown ids.");
 
     const oversizedHtmlResult = await client.callTool({
       arguments: { html: "x".repeat(1024 * 1024 + 1) },
