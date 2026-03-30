@@ -12,9 +12,9 @@ export type MarkdownPagePayload = {
 
 export function MarkdownPageApp({ markdown }: MarkdownPagePayload) {
   return (
-    <div className="min-h-screen bg-white text-[color:var(--foreground)]">
-      <main className="mx-auto flex min-h-screen w-full max-w-5xl flex-col justify-center px-6 py-12 sm:px-12 lg:py-16">
-        <article className="streamdown-shell overflow-hidden border border-[color:var(--shell-line)] bg-white px-6 py-8 sm:px-12 sm:py-12">
+    <div className="markdown-page min-h-screen bg-white text-[color:var(--foreground)]">
+      <main className="markdown-page__main">
+        <article className="markdown-page__article streamdown-shell">
           <Streamdown className="share-markdown" mode="static" plugins={markdownPlugins}>
             {markdown}
           </Streamdown>

@@ -1,5 +1,5 @@
 import { cjk } from "@streamdown/cjk";
-import { code } from "@streamdown/code";
+import { createCodePlugin } from "@streamdown/code";
 import { createMathPlugin } from "@streamdown/math";
 import { createMermaidPlugin } from "@streamdown/mermaid";
 
@@ -13,9 +13,13 @@ const markdownMermaid = createMermaidPlugin({
   }
 });
 
+const markdownCode = createCodePlugin({
+  themes: ["one-light", "github-dark"]
+});
+
 export const markdownPlugins = {
   cjk,
-  code,
+  code: markdownCode,
   math: markdownMath,
   mermaid: markdownMermaid
 };

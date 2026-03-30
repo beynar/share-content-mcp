@@ -18,7 +18,6 @@ import { createOgImageResponse } from "./og-image";
 const HTML_STORAGE_NAME = "html-storage";
 const MARKDOWN_PAGE_SCRIPT_PATH = "/assets/markdown-page.js";
 const MARKDOWN_PAGE_STYLE_PATH = "/assets/markdown-page.css";
-const MAX_CONTENT_BYTES = 1024 * 1024;
 const PAGE_CACHE_CONTROL = "public, max-age=0, must-revalidate";
 const DEFAULT_HTML_TITLE = "Shared HTML";
 const DEFAULT_MARKDOWN_TITLE = "Shared Markdown";
@@ -101,8 +100,6 @@ type HtmlStorageStub = ReturnType<Env["HTML_STORAGE"]["getByName"]> & {
   ): Promise<StorePageResult>;
 };
 
-const textEncoder = new TextEncoder();
-
 function getStorageStub(env: Env): HtmlStorageStub {
   return env.HTML_STORAGE.getByName(HTML_STORAGE_NAME) as HtmlStorageStub;
 }
@@ -140,10 +137,6 @@ function verifyAccessToken(request: Request, env: Env): boolean {
   }
 
   return timingSafeEqual(expected, provided);
-}
-
-function getTextSize(value: string): number {
-  return textEncoder.encode(value).byteLength;
 }
 
 function encodeBase64Url(bytes: Uint8Array): string {
@@ -372,10 +365,6 @@ function normalizeShareContent(input: ShareContentInput): {
   }
 
   if (html) {
-    if (getTextSize(html) > MAX_CONTENT_BYTES) {
-      throw new Error(`HTML exceeds the ${MAX_CONTENT_BYTES} byte limit.`);
-    }
-
     return {
       format: "html",
       html,
@@ -387,10 +376,6 @@ function normalizeShareContent(input: ShareContentInput): {
 
   if (!markdown) {
     throw new Error("Provide either html or markdown.");
-  }
-
-  if (getTextSize(markdown) > MAX_CONTENT_BYTES) {
-    throw new Error(`Markdown exceeds the ${MAX_CONTENT_BYTES} byte limit.`);
   }
 
   const title = normalizeOptionalTitle(input.title, deriveMarkdownTitle(markdown));
